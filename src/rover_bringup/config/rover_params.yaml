@@ -1,6 +1,6 @@
 # ═══════════════════════════════════════════════════════
-#  Rover System Configuration
-#  Loaded by rover.launch.py
+#  Rover System Configuration — Fixed
+#  QoS, rate limits and serial timing tuned for stability
 # ═══════════════════════════════════════════════════════
 
 rover_serial:
@@ -8,8 +8,13 @@ rover_serial:
     serial_port: "/dev/ttyUSB0"
     baud_rate: 115200
     reconnect_interval: 3.0
-    heartbeat_interval: 1.0
-    timeout: 2.0
+    # Heartbeat interval MUST be well under Arduino watchdog timeout (2000 ms)
+    # Use 0.8s to give plenty of margin
+    heartbeat_interval: 0.8
+    timeout: 1.0
+    # Rate-limit motor commands to avoid flooding the Arduino
+    # Arduino processes at ~40 pkt/s max due to ultrasonic pulseIn blocking
+    max_motor_cmd_hz: 10.0
 
 rover_camera:
   ros__parameters:
@@ -17,14 +22,17 @@ rover_camera:
     height: 480
     fps: 30
     frame_id: "camera_link"
+    # Set to 0 for /dev/video0, 1 for /dev/video1, etc.
     device_index: 0
 
 rover_tracking:
   ros__parameters:
+    # Orange ball HSV range — tune with tools/hsv_tuner.py
     hsv_lower: [5, 100, 100]
     hsv_upper: [25, 255, 255]
     min_area: 500.0
     dead_zone: 15.0
+    # PID gains — reduce if servos oscillate
     pan_kp: 0.05
     pan_ki: 0.001
     pan_kd: 0.01
@@ -52,18 +60,21 @@ rover_navigation:
     turn_duration: 0.6
     filter_window: 5
     distance_timeout: 3.0
-    update_rate: 20.0
+    # Reduced from 20 Hz — navigation decisions don't need high rate
+    update_rate: 10.0
 
 rover_control:
   ros__parameters:
     manual_timeout: 0.5
     max_linear_speed: 1.0
     max_angular_speed: 1.0
-    update_rate: 20.0
+    update_rate: 10.0
 
 rover_dashboard:
   ros__parameters:
     host: "0.0.0.0"
     port: 5000
     debug: false
-    stream_quality: 85
+    # Lower quality = smaller JPEG = faster stream on Pi
+    stream_quality: 75
+    telemetry_hz: 10.0

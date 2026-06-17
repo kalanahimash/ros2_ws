@@ -1,17 +1,23 @@
 """
-rover_navigation — Finite state machine obstacle avoidance.
+rover_navigation — Finite state machine obstacle avoidance (QoS fixed).
+
+ROOT CAUSE FIX:
+  /distance is published by rover_serial with BEST_EFFORT reliability.
+  The original code subscribed with RELIABLE — ROS2 DDS rejects this combination
+  (RELIABLE subscriber cannot receive from BEST_EFFORT publisher).
+  FIX: Subscribe to /distance with BEST_EFFORT to match the publisher.
 
 States: IDLE → FORWARD → STOP → REVERSE → TURN_LEFT|TURN_RIGHT → FORWARD
-        Any → EMERGENCY_STOP (on /emergency_stop or distance < emergency_threshold)
+        Any → EMERGENCY_STOP
 
 Published topics:
-  /auto_cmd           (rover_interfaces/RoverCmd)
-  /navigation_status  (rover_interfaces/NavigationStatus)
+  /auto_cmd           (rover_interfaces/RoverCmd)   RELIABLE
+  /navigation_status  (rover_interfaces/NavigationStatus) RELIABLE
 
 Subscribed topics:
-  /distance          (std_msgs/Float32)
-  /autonomous_enable (std_msgs/Bool)
-  /emergency_stop    (std_msgs/Bool)
+  /distance          (std_msgs/Float32)   BEST_EFFORT  ← fixed
+  /autonomous_enable (std_msgs/Bool)      RELIABLE
+  /emergency_stop    (std_msgs/Bool)      RELIABLE / TRANSIENT_LOCAL
 """
 
 from __future__ import annotations
@@ -22,18 +28,33 @@ from enum import Enum, auto
 
 import rclpy
 from rclpy.node import Node
-from rclpy.qos import QoSProfile, ReliabilityPolicy, DurabilityPolicy, HistoryPolicy
+from rclpy.qos import (
+    QoSProfile,
+    ReliabilityPolicy,
+    DurabilityPolicy,
+    HistoryPolicy,
+)
 from std_msgs.msg import Float32, Bool
 from rover_interfaces.msg import RoverCmd, NavigationStatus
 
 from rover_navigation.distance_filter import DistanceFilter
 
 
+# ── QoS Profiles ─────────────────────────────────────────────────────────────
+
+# Must match the publisher in rover_serial (BEST_EFFORT)
+_SENSOR_QOS = QoSProfile(
+    reliability=ReliabilityPolicy.BEST_EFFORT,
+    durability=DurabilityPolicy.VOLATILE,
+    history=HistoryPolicy.KEEP_LAST,
+    depth=5,
+)
+
 _RELIABLE_QOS = QoSProfile(
     reliability=ReliabilityPolicy.RELIABLE,
     durability=DurabilityPolicy.VOLATILE,
     history=HistoryPolicy.KEEP_LAST,
-    depth=5,
+    depth=10,
 )
 
 _ESTOP_QOS = QoSProfile(
@@ -71,18 +92,18 @@ class NavigationNode(Node):
         self.declare_parameter("turn_duration",       0.6)
         self.declare_parameter("filter_window",       5)
         self.declare_parameter("distance_timeout",    3.0)
-        self.declare_parameter("update_rate",         20.0)
+        self.declare_parameter("update_rate",         10.0)  # reduced from 20 Hz
 
-        self._stop_thresh   = self.get_parameter("stop_threshold").value
-        self._estop_thresh  = self.get_parameter("emergency_threshold").value
-        self._fwd_speed     = self.get_parameter("forward_speed").value
-        self._rev_speed     = self.get_parameter("reverse_speed").value
-        self._turn_speed    = self.get_parameter("turn_speed").value
-        self._stop_dur      = self.get_parameter("stop_duration").value
-        self._rev_dur       = self.get_parameter("reverse_duration").value
-        self._turn_dur      = self.get_parameter("turn_duration").value
-        self._dist_timeout  = self.get_parameter("distance_timeout").value
-        update_rate         = self.get_parameter("update_rate").value
+        self._stop_thresh  = self.get_parameter("stop_threshold").value
+        self._estop_thresh = self.get_parameter("emergency_threshold").value
+        self._fwd_speed    = self.get_parameter("forward_speed").value
+        self._rev_speed    = self.get_parameter("reverse_speed").value
+        self._turn_speed   = self.get_parameter("turn_speed").value
+        self._stop_dur     = self.get_parameter("stop_duration").value
+        self._rev_dur      = self.get_parameter("reverse_duration").value
+        self._turn_dur     = self.get_parameter("turn_duration").value
+        self._dist_timeout = self.get_parameter("distance_timeout").value
+        update_rate        = self.get_parameter("update_rate").value
 
         self._filter = DistanceFilter(
             window_size=self.get_parameter("filter_window").value
@@ -97,32 +118,32 @@ class NavigationNode(Node):
         self._last_distance_time = time.monotonic()
 
         # ── Publishers ──────────────────────────────────────────────────────
-        self._pub_cmd    = self.create_publisher(RoverCmd,          "/auto_cmd",          _RELIABLE_QOS)
-        self._pub_status = self.create_publisher(NavigationStatus,  "/navigation_status", _RELIABLE_QOS)
+        self._pub_cmd    = self.create_publisher(RoverCmd,         "/auto_cmd",          _RELIABLE_QOS)
+        self._pub_status = self.create_publisher(NavigationStatus, "/navigation_status", _RELIABLE_QOS)
 
         # ── Subscribers ─────────────────────────────────────────────────────
-        self.create_subscription(Float32, "/distance",          self._on_distance,    _RELIABLE_QOS)
+        # /distance: BEST_EFFORT to match rover_serial publisher
+        self.create_subscription(Float32, "/distance",          self._on_distance,    _SENSOR_QOS)
         self.create_subscription(Bool,    "/autonomous_enable", self._on_auto_enable, _RELIABLE_QOS)
         self.create_subscription(Bool,    "/emergency_stop",    self._on_estop,       _ESTOP_QOS)
 
-        # ── FSM update timer ────────────────────────────────────────────────
         self._timer = self.create_timer(1.0 / update_rate, self._update_fsm)
 
         self.get_logger().info("rover_navigation started (state=IDLE)")
 
-    # ─── Subscriber Callbacks ───────────────────────────────────────────────
+    # ─── Subscriber Callbacks ────────────────────────────────────────────────
 
     def _on_distance(self, msg: Float32) -> None:
         self._distance = self._filter.update(msg.data)
         self._last_distance_time = time.monotonic()
 
-        # Immediate emergency stop on critical proximity
-        if self._distance < self._estop_thresh and self._autonomous_enabled:
-            if self._state != NavState.EMERGENCY_STOP:
-                self.get_logger().warn(
-                    f"CRITICAL DISTANCE {self._distance:.1f} cm — emergency stop"
-                )
-                self._transition(NavState.EMERGENCY_STOP)
+        if (self._distance < self._estop_thresh
+                and self._autonomous_enabled
+                and self._state != NavState.EMERGENCY_STOP):
+            self.get_logger().warn(
+                f"CRITICAL DISTANCE {self._distance:.1f} cm — emergency stop"
+            )
+            self._transition(NavState.EMERGENCY_STOP)
 
     def _on_auto_enable(self, msg: Bool) -> None:
         self._autonomous_enabled = msg.data
@@ -141,16 +162,15 @@ class NavigationNode(Node):
         elif self._state == NavState.EMERGENCY_STOP:
             self._transition(NavState.IDLE)
 
-    # ─── FSM ────────────────────────────────────────────────────────────────
+    # ─── FSM ─────────────────────────────────────────────────────────────────
 
     def _update_fsm(self) -> None:
         if not self._autonomous_enabled or self._estop_active:
             return
 
-        # Distance sensor timeout safety
         if time.monotonic() - self._last_distance_time > self._dist_timeout:
             if self._state not in (NavState.IDLE, NavState.EMERGENCY_STOP):
-                self.get_logger().warn("Distance timeout — stopping")
+                self.get_logger().warn("Distance sensor timeout — stopping")
                 self._transition(NavState.IDLE)
                 return
 
@@ -199,8 +219,8 @@ class NavigationNode(Node):
         self, linear: float, angular: float, emergency_stop: bool = False
     ) -> None:
         msg = RoverCmd()
-        msg.linear        = float(linear)
-        msg.angular       = float(angular)
+        msg.linear         = float(linear)
+        msg.angular        = float(angular)
         msg.emergency_stop = emergency_stop
         self._pub_cmd.publish(msg)
 
