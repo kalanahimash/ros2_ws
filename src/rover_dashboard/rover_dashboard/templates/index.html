@@ -1,0 +1,153 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Rover Dashboard</title>
+  <link rel="stylesheet" href="/static/dashboard.css">
+</head>
+<body>
+
+<!-- ═══════════════ HEADER ═══════════════ -->
+<header class="header">
+  <div class="header-left">
+    <span class="rover-icon">🤖</span>
+    <h1>Rover Dashboard</h1>
+    <span class="version">v2.0</span>
+  </div>
+  <div class="header-right">
+    <span id="fps-badge" class="badge badge-info">0 FPS</span>
+    <span id="conn-badge" class="badge badge-error">Offline</span>
+    <button id="estop-btn" class="btn btn-danger" onclick="triggerEstop()">⛔ E-STOP</button>
+    <button id="reset-btn" class="btn btn-warning" onclick="resetEstop()">↺ RESET</button>
+  </div>
+</header>
+
+<!-- ═══════════════ MAIN GRID ═══════════════ -->
+<main class="grid">
+
+  <!-- ─── Video Panel ─── -->
+  <section class="panel panel-video">
+    <div class="panel-title">📷 Live Camera</div>
+    <div class="video-container">
+      <img id="video-stream" src="/video_feed" alt="Camera stream">
+      <div id="estop-overlay" class="estop-overlay hidden">⛔ EMERGENCY STOP</div>
+    </div>
+    <div class="video-footer">
+      <span id="track-state-badge" class="badge badge-info">TRACKING: OFF</span>
+      <span id="nav-state-badge"   class="badge badge-info">NAV: IDLE</span>
+      <span id="mode-badge"        class="badge badge-info">MODE: IDLE</span>
+    </div>
+  </section>
+
+  <!-- ─── Telemetry Panel ─── -->
+  <section class="panel panel-telemetry">
+    <div class="panel-title">📊 Telemetry</div>
+
+    <div class="telem-row">
+      <label>Distance</label>
+      <div class="progress-bar-wrap">
+        <div id="dist-bar" class="progress-bar" style="width:100%"></div>
+      </div>
+      <span id="dist-val" class="telem-val">-- cm</span>
+    </div>
+
+    <div class="telem-row">
+      <label>Pan Angle</label>
+      <input id="pan-display" type="range" min="0" max="180" value="90" readonly class="slider-readonly">
+      <span id="pan-val" class="telem-val">90°</span>
+    </div>
+
+    <div class="telem-row">
+      <label>Tilt Angle</label>
+      <input id="tilt-display" type="range" min="30" max="150" value="90" readonly class="slider-readonly">
+      <span id="tilt-val" class="telem-val">90°</span>
+    </div>
+
+    <div class="telem-row">
+      <label>Battery</label>
+      <div class="progress-bar-wrap">
+        <div id="bat-bar" class="progress-bar bat-bar" style="width:0%"></div>
+      </div>
+      <span id="bat-val" class="telem-val">-- V</span>
+    </div>
+
+    <div class="telem-row">
+      <label>Watchdog</label>
+      <span id="watchdog-badge" class="badge badge-ok">OK</span>
+    </div>
+  </section>
+
+  <!-- ─── Control Panel ─── -->
+  <section class="panel panel-control">
+    <div class="panel-title">🕹 Manual Control</div>
+
+    <div class="joystick-area">
+      <canvas id="joystick-canvas" width="180" height="180"></canvas>
+    </div>
+
+    <div class="key-hint">W/A/S/D or arrow keys | Space = stop</div>
+
+    <div class="control-row">
+      <label>Manual Pan</label>
+      <input id="pan-slider" type="range" min="0" max="180" value="90"
+             oninput="sendPan(this.value)" class="slider">
+      <span id="pan-manual-val">90°</span>
+    </div>
+
+    <div class="control-row">
+      <label>Manual Tilt</label>
+      <input id="tilt-slider" type="range" min="30" max="150" value="90"
+             oninput="sendTilt(this.value)" class="slider">
+      <span id="tilt-manual-val">90°</span>
+    </div>
+  </section>
+
+  <!-- ─── Mode Panel ─── -->
+  <section class="panel panel-mode">
+    <div class="panel-title">⚙ Modes</div>
+
+    <div class="mode-row">
+      <label class="toggle-label">
+        <span>Object Tracking</span>
+        <input id="tracking-toggle" type="checkbox" onchange="toggleTracking(this.checked)">
+        <span class="toggle-slider"></span>
+      </label>
+    </div>
+
+    <div class="mode-row">
+      <label class="toggle-label">
+        <span>Autonomous Navigation</span>
+        <input id="auto-toggle" type="checkbox" onchange="toggleAutonomous(this.checked)">
+        <span class="toggle-slider"></span>
+      </label>
+    </div>
+
+    <hr class="divider">
+    <div class="panel-title" style="margin-top:0.5rem">🔑 Keyboard Shortcuts</div>
+    <table class="key-table">
+      <tr><td>W / ↑</td><td>Forward</td></tr>
+      <tr><td>S / ↓</td><td>Backward</td></tr>
+      <tr><td>A / ←</td><td>Turn Left</td></tr>
+      <tr><td>D / →</td><td>Turn Right</td></tr>
+      <tr><td>Space</td><td>Stop</td></tr>
+      <tr><td>E</td><td>Emergency Stop</td></tr>
+      <tr><td>R</td><td>Reset E-Stop</td></tr>
+      <tr><td>T</td><td>Toggle Tracking</td></tr>
+      <tr><td>N</td><td>Toggle Autonomous</td></tr>
+    </table>
+  </section>
+
+  <!-- ─── Log Panel ─── -->
+  <section class="panel panel-log">
+    <div class="panel-title">📋 Event Log</div>
+    <div id="log-area" class="log-area"></div>
+  </section>
+
+</main>
+
+<!-- ═══════════════ SCRIPTS ═══════════════ -->
+<script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.7.2/socket.io.min.js"></script>
+<script src="/static/dashboard.js"></script>
+</body>
+</html>

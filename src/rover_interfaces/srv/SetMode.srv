@@ -1,0 +1,7 @@
+# Request: desired mode string
+# Valid modes: IDLE, MANUAL, AUTONOMOUS, TRACKING
+string mode
+---
+# Response
+bool success
+string message

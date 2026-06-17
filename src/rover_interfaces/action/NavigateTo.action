@@ -1,0 +1,15 @@
+# Goal: target position (future use with odometry)
+float32 x
+float32 y
+float32 heading_deg
+---
+# Result
+bool success
+string message
+float32 final_x
+float32 final_y
+---
+# Feedback
+float32 distance_remaining
+string current_state
+float32 progress_percent

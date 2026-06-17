@@ -1,0 +1,69 @@
+# ═══════════════════════════════════════════════════════
+#  Rover System Configuration
+#  Loaded by rover.launch.py
+# ═══════════════════════════════════════════════════════
+
+rover_serial:
+  ros__parameters:
+    serial_port: "/dev/ttyUSB0"
+    baud_rate: 115200
+    reconnect_interval: 3.0
+    heartbeat_interval: 1.0
+    timeout: 2.0
+
+rover_camera:
+  ros__parameters:
+    width: 640
+    height: 480
+    fps: 30
+    frame_id: "camera_link"
+    device_index: 0
+
+rover_tracking:
+  ros__parameters:
+    hsv_lower: [5, 100, 100]
+    hsv_upper: [25, 255, 255]
+    min_area: 500.0
+    dead_zone: 15.0
+    pan_kp: 0.05
+    pan_ki: 0.001
+    pan_kd: 0.01
+    tilt_kp: 0.05
+    tilt_ki: 0.001
+    tilt_kd: 0.01
+    servo_pan_min: 0.0
+    servo_pan_max: 180.0
+    servo_pan_center: 90.0
+    servo_tilt_min: 30.0
+    servo_tilt_max: 150.0
+    servo_tilt_center: 90.0
+    lost_timeout: 3.0
+    search_speed: 0.3
+
+rover_navigation:
+  ros__parameters:
+    stop_threshold: 30.0
+    emergency_threshold: 10.0
+    forward_speed: 0.6
+    reverse_speed: 0.5
+    turn_speed: 0.5
+    stop_duration: 0.5
+    reverse_duration: 0.8
+    turn_duration: 0.6
+    filter_window: 5
+    distance_timeout: 3.0
+    update_rate: 20.0
+
+rover_control:
+  ros__parameters:
+    manual_timeout: 0.5
+    max_linear_speed: 1.0
+    max_angular_speed: 1.0
+    update_rate: 20.0
+
+rover_dashboard:
+  ros__parameters:
+    host: "0.0.0.0"
+    port: 5000
+    debug: false
+    stream_quality: 85
