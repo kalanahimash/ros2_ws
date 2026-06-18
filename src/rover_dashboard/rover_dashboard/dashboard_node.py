@@ -273,10 +273,10 @@ class DashboardNode(Node):
 
     def _run_flask(self) -> None:
         if not FLASK_AVAILABLE:
-           self.get_logger().error("Flask not available - dashboard disable")
-           return
+            self.get_logger().error("Flask not available - dashboard disable")
+            return
         
-            # Still run without WebSocket so MJPEG stream and REST API work
+        # Still run without WebSocket so MJPEG stream and REST API work
         async_mode = "threading"
         
 
@@ -286,7 +286,6 @@ class DashboardNode(Node):
         app      = Flask(__name__, template_folder=templates, static_folder=static)
         app.config["SECRET_KEY"] = "rover-2024-secret"
         
-        if SOCKETIO_AVAILABLE:
         socketio = SocketIO(
             app,
             cors_allowed_origins="*",
