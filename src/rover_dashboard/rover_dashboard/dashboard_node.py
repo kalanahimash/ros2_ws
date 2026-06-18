@@ -26,19 +26,14 @@ ROOT CAUSES FIXED:
    FIX: Wrap all emit() calls in try/except. The telemetry timer only runs
         when socketio is ready.
 """
-
 from __future__ import annotations
+
 
 # ════════════════════════════════════════════════════════════════════════════
 # eventlet MUST be monkey-patched before any other import (including rclpy)
 # so that all blocking I/O becomes cooperative.
 # ════════════════════════════════════════════════════════════════════════════
-try:
-    import eventlet
-    eventlet.monkey_patch()
-    EVENTLET_AVAILABLE = True
-except ImportError:
-    EVENTLET_AVAILABLE = False
+
 
 import io
 import os
@@ -191,11 +186,7 @@ class DashboardNode(Node):
             f"rover_dashboard started → http://{self._host}:{self._port}"
         )
 
-        if not EVENTLET_AVAILABLE:
-            self.get_logger().error(
-                "eventlet not installed! WebSocket will not work. "
-                "Run: pip3 install eventlet"
-            )
+        
         if not FLASK_AVAILABLE:
             self.get_logger().error(
                 "Flask/Flask-SocketIO not installed! "
@@ -282,23 +273,20 @@ class DashboardNode(Node):
 
     def _run_flask(self) -> None:
         if not FLASK_AVAILABLE:
-            self.get_logger().error("Flask not available — dashboard disabled")
-            return
-        if not EVENTLET_AVAILABLE:
-            self.get_logger().error(
-                "eventlet not available — WebSocket disabled. "
-                "Install with: pip3 install eventlet"
-            )
+           self.get_logger().error("Flask not available - dashboard disable")
+           return
+        
             # Still run without WebSocket so MJPEG stream and REST API work
-            async_mode = "threading"
-        else:
-            async_mode = "eventlet"
+        async_mode = "threading"
+        
 
         templates = _find_dir("templates")
         static    = _find_dir("static")
 
         app      = Flask(__name__, template_folder=templates, static_folder=static)
         app.config["SECRET_KEY"] = "rover-2024-secret"
+        
+        if SOCKETIO_AVAILABLE:
         socketio = SocketIO(
             app,
             cors_allowed_origins="*",
@@ -335,10 +323,7 @@ class DashboardNode(Node):
                             + _black_jpeg()
                             + b"\r\n"
                         )
-                    # ~20 FPS stream — eventlet sleep is cooperative
-                    if EVENTLET_AVAILABLE:
-                        eventlet.sleep(0.05)
-                    else:
+                              
                         time.sleep(0.05)
 
             return Response(
