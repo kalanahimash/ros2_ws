@@ -437,6 +437,7 @@ class DashboardNode(Node):
             port=self._port,
             use_reloader=False,
             log_output=False,
+            allow_unsafe_werkzeug=True,
         )
 
 
