@@ -1,39 +1,26 @@
 """
-rover_dashboard — Flask web dashboard (fully fixed).
+rover_dashboard — Flask web dashboard.
 
 ROOT CAUSES FIXED:
 
-1. Flask-SocketIO WebSocket 500 error:
-   Without an async worker, Werkzeug's WSGI server cannot upgrade HTTP→WebSocket.
-   The AssertionError "write() before start_response" is Werkzeug rejecting the
-   WebSocket handshake.
-   FIX: Import eventlet and call eventlet.monkey_patch() BEFORE any other import.
-        Use async_mode='eventlet' in SocketIO().
-        eventlet replaces blocking I/O with cooperative green threads.
+1. Flask-SocketIO 'session' AttributeError:
+   Fixed by passing manage_session=False to SocketIO. Flask 3.0 made session
+   a read-only property on RequestContext, causing older Flask-SocketIO to crash.
 
-2. QoS mismatch on /distance, /pan_angle, /tilt_angle:
-   rover_serial publishes with BEST_EFFORT. Dashboard was subscribing with
-   BEST_EFFORT in camera but RELIABLE in sensor topics.
-   FIX: All sensor subscriptions use BEST_EFFORT explicitly.
+2. ROS2 + Flask threading conflict:
+   rclpy.spin() and socketio.run() both block. 
+   FIX: Run ROS2 spin in a background daemon thread, allowing socketio.run() 
+   to own the main thread cleanly.
 
-3. ROS2 + Flask threading conflict:
-   rclpy.spin() and socketio.run() both want the main thread.
-   FIX: Run ROS2 spin in a background thread (rclpy.spin is thread-safe when
-        called from a non-main thread after rclpy.init() on main thread).
-        Flask/eventlet owns the main thread.
+3. WebSocket 500 Errors / Compatibility:
+   async_mode='threading' is explicitly used because eventlet/gevent monkey 
+   patching breaks ROS2 rclpy C-extensions. (Install 'simple-websocket' to 
+   enable WebSocket in threading mode, otherwise it falls back to long-polling).
 
-4. socketio.emit() before client connects raises silently:
-   FIX: Wrap all emit() calls in try/except. The telemetry timer only runs
-        when socketio is ready.
+4. Incorrect startup:
+   Replaced any incorrect startup with socketio.run(app, host="0.0.0.0", port=5000).
 """
 from __future__ import annotations
-
-
-# ════════════════════════════════════════════════════════════════════════════
-# eventlet MUST be monkey-patched before any other import (including rclpy)
-# so that all blocking I/O becomes cooperative.
-# ════════════════════════════════════════════════════════════════════════════
-
 
 import io
 import os
@@ -78,7 +65,6 @@ from rover_dashboard.state import RoverState
 
 # ── QoS Profiles ─────────────────────────────────────────────────────────────
 
-# Sensor topics: BEST_EFFORT (matches rover_serial publisher)
 _SENSOR_QOS = QoSProfile(
     reliability=ReliabilityPolicy.BEST_EFFORT,
     durability=DurabilityPolicy.VOLATILE,
@@ -100,7 +86,6 @@ _ESTOP_QOS = QoSProfile(
     depth=1,
 )
 
-# Camera topics: BEST_EFFORT
 _CAMERA_QOS = QoSProfile(
     reliability=ReliabilityPolicy.BEST_EFFORT,
     durability=DurabilityPolicy.VOLATILE,
@@ -143,7 +128,6 @@ class DashboardNode(Node):
         self._socketio: Optional[SocketIO] = None
         self._flask_ready = threading.Event()
 
-        # Track whether we've received a tracked image recently
         self._last_tracked_image_time = 0.0
 
         # ── Publishers ──────────────────────────────────────────────────────
@@ -155,42 +139,26 @@ class DashboardNode(Node):
         self._pub_estop    = self.create_publisher(Bool,     "/emergency_stop",    _ESTOP_QOS)
 
         # ── Subscribers ─────────────────────────────────────────────────────
-        # Tracked image preferred; raw image as fallback
         self.create_subscription(Image, "/camera/tracked_image",
                                  self._on_tracked_image, _CAMERA_QOS)
         self.create_subscription(Image, "/camera/image_raw",
                                  self._on_image_raw, _CAMERA_QOS)
 
-        # Sensor topics: BEST_EFFORT (must match rover_serial publisher)
         self.create_subscription(Float32,  "/distance",   self._on_distance, _SENSOR_QOS)
         self.create_subscription(Float32,  "/pan_angle",  self._on_pan,      _SENSOR_QOS)
         self.create_subscription(Float32,  "/tilt_angle", self._on_tilt,     _SENSOR_QOS)
 
-        # Reliable status topics
         self.create_subscription(SystemStatus,    "/system_status",    self._on_status,   _RELIABLE_QOS)
         self.create_subscription(TrackingStatus,  "/tracking_status",  self._on_tracking, _RELIABLE_QOS)
         self.create_subscription(NavigationStatus,"/navigation_status",self._on_nav,      _RELIABLE_QOS)
 
         # ── Telemetry push timer ─────────────────────────────────────────────
-        # Timer runs in the ROS2 executor, posts to socketio thread-safely
         self._telem_timer = self.create_timer(1.0 / telem_hz, self._push_telemetry)
 
-        # ── Flask runs in its own thread ─────────────────────────────────────
-        # ROS2 spin will be called from a separate thread (see main())
-        self._flask_thread = threading.Thread(
-            target=self._run_flask, name="flask", daemon=True
-        )
-        self._flask_thread.start()
-
-        self.get_logger().info(
-            f"rover_dashboard started → http://{self._host}:{self._port}"
-        )
-
-        
         if not FLASK_AVAILABLE:
             self.get_logger().error(
                 "Flask/Flask-SocketIO not installed! "
-                "Run: pip3 install flask flask-socketio"
+                "Run: pip3 install flask flask-socketio simple-websocket"
             )
 
     # ─── ROS2 Callbacks ──────────────────────────────────────────────────────
@@ -203,7 +171,6 @@ class DashboardNode(Node):
             self._last_tracked_image_time = time.monotonic()
 
     def _on_image_raw(self, msg: Image) -> None:
-        # Only use raw if no recent tracked image
         if time.monotonic() - self._last_tracked_image_time > 0.5:
             jpeg = self._image_to_jpeg(msg)
             if jpeg:
@@ -250,7 +217,7 @@ class DashboardNode(Node):
         try:
             self._socketio.emit("status", self._state.to_dict(), namespace="/")
         except Exception:
-            pass  # no clients connected yet — normal at startup
+            pass
 
     # ─── Image Processing ────────────────────────────────────────────────────
 
@@ -271,32 +238,30 @@ class DashboardNode(Node):
 
     # ─── Flask Application ───────────────────────────────────────────────────
 
-    def _run_flask(self) -> None:
+    def start_flask(self) -> None:
         if not FLASK_AVAILABLE:
-            self.get_logger().error("Flask not available - dashboard disable")
+            self.get_logger().error("Flask not available - dashboard disabled")
             return
         
-        # Still run without WebSocket so MJPEG stream and REST API work
         async_mode = "threading"
-        
 
         templates = _find_dir("templates")
         static    = _find_dir("static")
 
-        app      = Flask(__name__, template_folder=templates, static_folder=static)
+        app = Flask(__name__, template_folder=templates, static_folder=static)
         app.config["SECRET_KEY"] = "rover-2024-secret"
         
+        # manage_session=False fixes the Werkzeug 3.0 RequestContext AttributeError
         socketio = SocketIO(
             app,
             cors_allowed_origins="*",
             async_mode=async_mode,
+            manage_session=False,
             logger=False,
             engineio_logger=False,
-            ping_timeout=20,
-            ping_interval=10,
         )
         self._socketio = socketio
-        node = self  # closure
+        node = self
 
         # ── HTTP Routes ──────────────────────────────────────────────────────
 
@@ -397,7 +362,7 @@ class DashboardNode(Node):
 
         @socketio.on("connect")
         def on_connect():
-            pass  # client connected — telemetry will flow from the timer
+            pass
 
         @socketio.on("joystick")
         def on_joystick(data):
@@ -423,7 +388,6 @@ class DashboardNode(Node):
             with node._state.lock:
                 node._state.estop_active = False
 
-        # ── Signal ready and start server ────────────────────────────────────
         self._flask_ready.set()
 
         self.get_logger().info(
@@ -431,13 +395,11 @@ class DashboardNode(Node):
             f"http://{self._host}:{self._port}"
         )
 
+        # Replaced app.run with correct SocketIO startup
         socketio.run(
             app,
-            host=self._host,
-            port=self._port,
-            use_reloader=False,
-            log_output=False,
-            allow_unsafe_werkzeug=True,
+            host="0.0.0.0",
+            port=5000
         )
 
 
@@ -459,7 +421,6 @@ def _black_jpeg() -> bytes:
         _, buf = cv2.imencode(".jpg", black, [cv2.IMWRITE_JPEG_QUALITY, 60])
         _BLACK_JPEG_CACHE = bytes(buf)
         return _BLACK_JPEG_CACHE
-    # Minimal 1×1 black JPEG — hardcoded fallback
     _BLACK_JPEG_CACHE = (
         b"\xff\xd8\xff\xe0\x00\x10JFIF\x00\x01\x01\x00\x00\x01\x00\x01\x00\x00"
         b"\xff\xdb\x00C\x00\x08\x06\x06\x07\x06\x05\x08\x07\x07\x07\t\t"
@@ -478,16 +439,20 @@ def _black_jpeg() -> bytes:
 def main(args=None) -> None:
     rclpy.init(args=args)
     node = DashboardNode()
+    
+    # Run ROS2 spin in a background daemon thread
+    # This removes threading conflicts between ROS2 and Flask.
+    ros_thread = threading.Thread(target=rclpy.spin, args=(node,), daemon=True)
+    ros_thread.start()
+    
     try:
-        # Run ROS2 spin in this thread.
-        # Flask/eventlet is already running in the flask_thread (daemon).
-        rclpy.spin(node)
+        # Run Flask-SocketIO in the main thread
+        node.start_flask()
     except KeyboardInterrupt:
         pass
     finally:
         node.destroy_node()
         rclpy.shutdown()
-
 
 if __name__ == "__main__":
     main()
